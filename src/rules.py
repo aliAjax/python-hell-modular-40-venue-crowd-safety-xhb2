@@ -95,6 +95,15 @@ def _validate_task(actor, data, lookup):
     return {}
 
 
+def _validate_team(actor, data, lookup):
+    team_id = str(data.get("team_id", "")).strip()
+    if not team_id:
+        raise ValidationError("team_id is required")
+    if _find_one(lookup, "team", "team_id", team_id):
+        raise ConflictError("team already exists: " + team_id)
+    return {"team_id": team_id, "current_task_id": None}
+
+
 def _validate_zone_admit(actor, entity, data, lookup):
     try:
         count = int(data.get("count"))
@@ -155,6 +164,7 @@ class RuleEngine:
         "medical_points": "medical_point",
         "incidents": "incident",
         "tasks": "task",
+        "teams": "team",
     }
     INITIAL_STATUS = {
         "venue": "ready",
@@ -164,6 +174,7 @@ class RuleEngine:
         "medical_point": "standby",
         "incident": "reported",
         "task": "draft",
+        "team": "available",
     }
     TRANSITIONS = {
         "venue": {
@@ -218,6 +229,7 @@ class RuleEngine:
         "medical_point": ("venue_id", "zone_id", "capacity", "equipment_level"),
         "incident": ("venue_id", "zone_id", "source_ref", "incident_type", "severity", "reported_at"),
         "task": ("incident_id", "venue_id", "zone_id", "team_id", "task_type"),
+        "team": ("team_id",),
     }
     ACTION_REQUIRED = {
         ("venue", "limit"): ("reason", "capacity_limit"),
@@ -253,6 +265,7 @@ class RuleEngine:
         "medical_point": ("supervisor", "coordinator", "admin"),
         "incident": ("operator", "supervisor", "coordinator", "admin"),
         "task": ("supervisor", "coordinator", "admin"),
+        "team": ("coordinator", "admin"),
     }
     ROLE_ACTIONS = {
         "limit": ("coordinator", "supervisor", "admin"),
@@ -285,6 +298,7 @@ class RuleEngine:
         "medical_point": _validate_medical_point,
         "incident": _validate_incident,
         "task": _validate_task,
+        "team": _validate_team,
     }
     CUSTOM_TRANSITIONS = {
         ("zone", "admit"): _validate_zone_admit,
@@ -293,6 +307,9 @@ class RuleEngine:
         ("incident", "correct"): _validate_correct,
         ("task", "assign"): _validate_task_assign,
     }
+    REASSIGN_ROLES = ("supervisor", "coordinator", "admin")
+    REASSIGNABLE_TASK_STATUSES = ("assigned", "enroute", "on_scene")
+    ACTIVE_INCIDENT_STATUSES = ("reported", "triaged", "dispatched", "reopened")
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)
@@ -341,3 +358,32 @@ class RuleEngine:
         if extra:
             patch.update(extra)
         return next_status, patch
+
+    def validate_reassign(self, actor, task, data, lookup=None):
+        kind = self.normalize_kind(task["kind"])
+        if kind != "task":
+            raise ValidationError("only tasks can be reassigned")
+        if task["status"] not in self.REASSIGNABLE_TASK_STATUSES:
+            raise InvalidTransition("cannot reassign task in status %s" % task["status"])
+        self._ensure_role(actor, self.REASSIGN_ROLES)
+        new_team_id = data.get("new_team_id")
+        if new_team_id is None or not str(new_team_id).strip():
+            raise ValidationError("new_team_id is required")
+        new_team_id = str(new_team_id).strip()
+        if new_team_id == task["data"].get("team_id"):
+            raise ValidationError("new team must differ from the current team")
+        if not data.get("reason"):
+            raise ValidationError("reassign reason is required")
+        incident = _find_one(lookup, "incident", "id", task["data"].get("incident_id"))
+        if not incident:
+            raise NotFoundError("incident not found for task")
+        if incident["status"] not in self.ACTIVE_INCIDENT_STATUSES:
+            raise ConflictError(
+                "incident is %s; reassignment is no longer valid" % incident["status"]
+            )
+        return {
+            "new_team_id": new_team_id,
+            "reason": data["reason"],
+            "incident": incident,
+            "incident_priority": incident["data"].get("priority_score"),
+        }

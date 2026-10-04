@@ -18,6 +18,7 @@ def main(argv=None):
     repository = SQLiteRepository(args.db)
     rules = RuleEngine()
     service = DomainService(repository, rules)
+    service.upgrade()
     server = create_server(
         args.host,
         args.port,

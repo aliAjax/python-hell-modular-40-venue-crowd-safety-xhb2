@@ -21,7 +21,15 @@ python3 app.py --db ./data.db --port 8340
 
 ## 核心对象
 
-`venue`为场馆，`zone`为区域，`gate`为入场口，`post`为安保岗位，`medical_point`为医疗点，`incident`为事件，`task`为现场任务。
+`venue`为场馆，`zone`为区域，`gate`为入场口，`post`为安保岗位，`medical_point`为医疗点，`incident`为事件，`task`为现场任务，`team`为班组（记录当前任务与占用状态）。
+
+## 任务改派
+
+指挥员（`coordinator`/`supervisor`/`admin`）可把仍在执行（`assigned`/`enroute`/`on_scene`）的任务改派给新班组：`POST /api/entities/<task_id>/actions`，`{"action": "reassign", "new_team_id": "...", "reason": "..."}`。改派在单个事务内同时释放原班组、占用新班组，并在任务的`reassign_history`中保留返工记录（含原/新班组、指挥员、事件优先级）。
+
+- 新班组已被占用时返回`409`占用冲突；并发改派同一班组时后到者看到冲突，写入失败整体回滚，可更换班组后重试，不会出现两个班组同时占住同一任务。
+- 事件已解决/取消后改派失效（`409`）；越权角色改派返回`403`。
+- 任务完成或取消时自动释放班组。旧库升级（`service.upgrade()`，启动时执行）会为历史`team_id`补齐班组行并写入每队当前任务。
 
 ## 接口
 

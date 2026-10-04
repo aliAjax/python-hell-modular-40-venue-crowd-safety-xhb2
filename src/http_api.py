@@ -108,6 +108,11 @@ def create_handler(service, rules, static_dir):
                     action = body.pop("action", None)
                     if not action:
                         raise ValidationError("action is required")
+                    if action == "reassign":
+                        expected_version = body.pop("expected_version", None)
+                        return self._send(
+                            200, service.reassign(actor, parts[2], body, expected_version)
+                        )
                     return self._send(
                         200,
                         service.transition(
@@ -123,6 +128,11 @@ def create_handler(service, rules, static_dir):
                     action = body.pop("action", None)
                     if not action:
                         raise ValidationError("action is required")
+                    if action == "reassign":
+                        expected_version = body.pop("expected_version", None)
+                        return self._send(
+                            200, service.reassign(actor, parts[2], body, expected_version)
+                        )
                     return self._send(
                         200,
                         service.transition(
