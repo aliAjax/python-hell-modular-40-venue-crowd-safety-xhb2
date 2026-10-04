@@ -43,9 +43,12 @@ class DomainService:
         entity = self.repository.get_entity(entity_id)
         if not entity:
             raise NotFoundError("entity not found: " + entity_id)
+        payload = dict(data or {})
+        if self.rules.normalize_kind(entity["kind"]) == "task" and action == "reassign":
+            return self._reassign(actor, entity, payload, expected_version)
         expected = int(expected_version) if expected_version is not None else entity["version"]
         next_status, patch = self.rules.validate_transition(
-            actor, entity, action, dict(data or {}), self._lookup
+            actor, entity, action, payload, self._lookup
         )
         merged = dict(entity["data"])
         merged.update(patch)
@@ -60,6 +63,37 @@ class DomainService:
         )
         return updated
 
+    def _reassign(self, actor, entity, payload, expected_version):
+        # 先在规则层做角色、必填字段和状态的快速校验（含读快照的占用检查），
+        # 真正的占用仲裁在单事务内完成，保证失败回滚、可重试、不会两边都占住。
+        next_status, patch = self.rules.validate_transition(
+            actor, entity, "reassign", payload, self._lookup
+        )
+        expected_task_version = (
+            int(expected_version) if expected_version is not None else entity["version"]
+        )
+        merged = dict(entity["data"])
+        merged.update(patch)
+        updated = self.repository.reassign_task(
+            task_id=entity["id"],
+            expected_task_version=expected_task_version,
+            expected_incident_version=int(payload["incident_version"]),
+            new_team_id=payload["new_team_id"],
+            data=merged,
+            from_status=entity["status"],
+            to_status=next_status,
+        )
+        audit_patch = {key: value for key, value in patch.items() if key != "reassignment_history"}
+        self.audit.record(
+            entity["id"],
+            actor,
+            "reassign",
+            entity["status"],
+            updated["status"],
+            {"patch": audit_patch, "incident_version": int(payload["incident_version"])},
+        )
+        return updated
+
     def get(self, entity_id):
         entity = self.repository.get_entity(entity_id)
         if not entity:
@@ -70,6 +104,9 @@ class DomainService:
         if kind:
             kind = self.rules.normalize_kind(kind)
         return self.repository.list_entities(kind=kind, status=status)
+
+    def team_states(self):
+        return self.repository.list_team_states()
 
     def audit_log(self, entity_id=None):
         return self.repository.list_audit(entity_id=entity_id)

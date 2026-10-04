@@ -138,6 +138,56 @@ def _validate_task_assign(actor, entity, data, lookup):
     return {"assigned_by": actor.user_id}
 
 
+ACTIVE_TASK_STATUSES = ("assigned", "enroute", "on_scene")
+ACTIVE_INCIDENT_STATUSES = ("dispatched", "reopened")
+
+
+def _validate_task_reassign(actor, entity, data, lookup):
+    incident = _find_one(lookup, "incident", "id", entity["data"].get("incident_id"))
+    if not incident:
+        raise ValidationError("task incident no longer exists")
+    try:
+        expected_incident_version = int(data.get("incident_version"))
+    except (TypeError, ValueError):
+        raise ValidationError("incident_version must be an integer")
+    if incident["status"] not in ACTIVE_INCIDENT_STATUSES:
+        raise ConflictError("incident is not active for reassignment")
+    # 事件状态变化后，基于旧版本准备的改派立即失效。
+    if expected_incident_version != incident["version"]:
+        raise ConflictError(
+            "incident version mismatch: prepared %s, current %s"
+            % (expected_incident_version, incident["version"])
+        )
+    current_team_id = entity["data"].get("team_id")
+    new_team_id = data.get("new_team_id")
+    if not new_team_id:
+        raise ValidationError("missing required field: new_team_id")
+    if new_team_id == current_team_id:
+        raise ValidationError("new team must differ from the current team")
+    for task in lookup("task", "team_id", new_team_id) or []:
+        if task["id"] != entity["id"] and task["status"] in ACTIVE_TASK_STATUSES:
+            raise ConflictError("target team already has active task " + task["id"])
+    entry = {
+        "from_team_id": current_team_id,
+        "to_team_id": new_team_id,
+        "actor_id": actor.user_id,
+        "reason": data["reason"],
+        "reassigned_at": data["reassigned_at"],
+        "incident_id": incident["id"],
+        "incident_version": incident["version"],
+        "incident_status": incident["status"],
+        "incident_priority": incident["data"].get("priority_score"),
+    }
+    history = list(entity["data"].get("reassignment_history") or [])
+    history.append(entry)
+    return {
+        "team_id": new_team_id,
+        "reassigned_by": actor.user_id,
+        "last_reassigned_at": data["reassigned_at"],
+        "reassignment_history": history,
+    }
+
+
 def _validate_correct(actor, entity, data, lookup):
     if not data.get("reason"):
         raise ValidationError("correction reason is required")
@@ -207,6 +257,8 @@ class RuleEngine:
             "acknowledge": (("assigned",), "enroute"),
             "arrive": (("enroute",), "on_scene"),
             "complete": (("on_scene",), "completed"),
+            # 改派在在途状态下进行：任务继续在途，只更换承接班组。
+            "reassign": (("enroute",), "enroute"),
             "cancel": (("draft", "assigned", "enroute", "on_scene"), "cancelled"),
         },
     }
@@ -243,6 +295,7 @@ class RuleEngine:
         ("task", "acknowledge"): ("acknowledged_at",),
         ("task", "arrive"): ("arrived_at",),
         ("task", "complete"): ("completed_at", "outcome"),
+        ("task", "reassign"): ("new_team_id", "incident_version", "reason", "reassigned_at"),
         ("task", "cancel"): ("reason",),
     }
     CREATE_ROLES = {
@@ -272,6 +325,7 @@ class RuleEngine:
         "dispatch": ("coordinator", "admin"),
         "resolve": ("supervisor", "coordinator", "admin"),
         "assign": ("supervisor", "coordinator", "admin"),
+        "reassign": ("coordinator", "admin"),
         "acknowledge": ("operator", "supervisor", "admin"),
         "arrive": ("operator", "supervisor", "admin"),
         "complete": ("operator", "supervisor", "admin"),
@@ -292,6 +346,7 @@ class RuleEngine:
         ("gate", "open"): _validate_gate_open,
         ("incident", "correct"): _validate_correct,
         ("task", "assign"): _validate_task_assign,
+        ("task", "reassign"): _validate_task_reassign,
     }
 
     def normalize_kind(self, kind):
